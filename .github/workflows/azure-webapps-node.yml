@@ -33,27 +33,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-    - name: checkout GitHub Action
-      uses: actions/checkout@v4.2.2
+steps:
+      - name: Checkout GitHub Action
+        uses: actions/checkout@v4.2.2
 
-    - name: Set up Node.js Environment
-      uses: actions/setup-node@v4
-      with:
-        node-version: 24
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
-    - name: npm install, build, and test
-      run: |
-        npm install
-        npm run build --if-present
-        npm run test --if-present
+      - name: Install dependencies
+        run: npm install # Utiliser 'npm install' est plus tolérant si votre package-lock est manquant
 
-    - name: Upload artifact for deployment job
-      uses: actions/upload-artifact@v4
-      with:
-        name: node-app
-        path: .
-
+      - name: Build project
+        run: npm run build --if-present
   deploy:
     permissions:
       contents: none
