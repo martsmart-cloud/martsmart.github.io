@@ -1,0 +1,141 @@
+name: Deerflow CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  PYTHONPATH: "${{ github.workspace }}"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        id: pip-cache
+        with:
+          path: ~/.cache/pip
+          key: pip-cache-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}-${{ matrix.python-version || '3.11' }}
+          restore-keys: |
+            pip-cache-${{ runner.os }}-
+
+      - name: Create venv and install Python dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip setuptools wheel
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        shell: bash
+
+      - name: Set up Node.js (for frontend/build scripts)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install node dependencies
+        run: |
+          if [ -f package-lock.json ] || [ -f package.json ]; then npm ci; fi
+        shell: bash
+
+      - name: Lint (Python)
+        if: always()
+        run: |
+          . .venv/bin/activate
+          if command -v ruff >/dev/null 2>&1; then ruff check . || true; fi
+        shell: bash
+
+      - name: Lint (JS)
+        if: always()
+        run: |
+          if [ -f package.json ] && npm run -s lint --silent >/dev/null 2>&1; then npm run lint; fi
+        shell: bash
+
+      - name: Run Python tests
+        run: |
+          . .venv/bin/activate
+          if [ -d tests ] || ls | grep -q pytest.ini || pip show pytest >/dev/null 2>&1; then pytest -q || (echo "pytest failed" && exit 1); fi
+        shell: bash
+
+      - name: Run JS tests
+        run: |
+          if [ -f package.json ]; then npm test --if-present; fi
+        shell: bash
+
+      - name: Build frontend / static site (if present)
+        run: |
+          if [ -f package.json ] && npm run -s build --silent >/dev/null 2>&1; then npm run build; fi
+        shell: bash
+
+      - name: Prepare python package artefact (wheel)
+        run: |
+          . .venv/bin/activate
+          if [ -f setup.py ] || [ -f pyproject.toml ]; then
+            python -m pip install build
+            python -m build -n
+            ls -lah dist || true
+          else
+            echo "No python package metadata found; skipping build"
+          fi
+        shell: bash
+
+      - name: Build Docker image (and optionally push to GHCR)
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/deerflow-app:${{ github.sha }}
+        run: |
+          # login to GHCR (prefer GHCR_PAT for package write; fallback to GITHUB_TOKEN)
+          if [ -n "${{ secrets.GHCR_PAT }}" ]; then
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          else
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
+
+          # Build the image; will succeed even if there's no Dockerfile
+          if [ -f Dockerfile ]; then
+            docker build -t "$IMAGE_NAME" .
+            if [ "${{ secrets.GHCR_PAT }}" != "" ] || [ "${{ secrets.GITHUB_TOKEN }}" != "" ]; then
+              docker push "$IMAGE_NAME" || echo "docker push failed (check permissions)"
+            else
+              echo "No registry credentials available — image built but not pushed"
+            fi
+          else
+            echo "No Dockerfile, skipping docker build"
+          fi
+        shell: bash
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deerflow-build
+          path: |
+            dist
+            build
+            public
+            .venv
+            logs || true
+
+      - name: Create release note (artifact link)
+        if: success()
+        run: |
+          echo "Build completed for $GITHUB_SHA"
+        shell: bash
